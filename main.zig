@@ -2,7 +2,7 @@ const std = @import("std");
 const sentinel = @import("std").meta.sentinel;
 
 const CSSAttribute = union(enum) {
-    unknown: u1,
+    unknown: void,
     color: []const u8,
     background: []const u8,
     background_color: []const u8,
@@ -11,15 +11,16 @@ const CSSAttribute = union(enum) {
     font_size: []const u8,
 };
 
-fn match_attribute(attribute: *CSSAttribute, name: []const u8, value: []const u8) !void {
+fn match_attribute(name: []const u8, value: []const u8) !CSSAttribute {
     const cssAttributeInfo = @typeInfo(CSSAttribute);
     inline for (cssAttributeInfo.Union.fields) |css_field| {
         if (comptime !std.mem.eql(u8, css_field.name, "unknown")) {
             if (std.mem.eql(u8, css_field.name, name)) {
-                attribute.* = @unionInit(CSSAttribute, css_field.name, value);
+                return @unionInit(CSSAttribute, css_field.name, value);
             }
         }
     }
+    return error.UnknownProperty;
 }
 
 const CSSBlock = struct {
@@ -29,6 +30,23 @@ const CSSBlock = struct {
 
 const CSSTree = struct {
     blocks: []CSSBlock,
+    fn print_tree(tree: *CSSTree) void {
+        for (tree.blocks, 0..) |block, i| {
+            std.debug.print("selector {d}: {s}\n", .{ i, block.selector });
+            for (block.attributes, 0..) |attr, j| {
+                inline for (@typeInfo(CSSAttribute).Union.fields) |css_field| {
+                    if (comptime !std.mem.eql(u8, css_field.name, "unknown")) {
+                        if (std.mem.eql(u8, css_field.name, @tagName(attr))) {
+                            // var attr_name: []const u8 = @as([]const u8, @tagName(attr));
+
+                            std.debug.print("\tattribute {d}: {s}\t value: {s}\n", .{ j, @tagName(attr), @field(attr, css_field.name) });
+                        }
+                    }
+                }
+            }
+            std.debug.print("\n", .{});
+        }
+    }
 };
 
 fn eat_whitespace(css: []const u8, initial_index: usize) usize {
@@ -151,8 +169,10 @@ fn parse_attribute(css: []const u8, initial_index: usize) !ParseAttributeResult 
     // Finally parse semi-colon: ;.
     index = try parse_syntax(css, index, ';');
 
-    var attribute = CSSAttribute{ .unknown = 1 };
-    try match_attribute(&attribute, name_res.identifier, value_res.identifier);
+    var attribute = match_attribute(name_res.identifier, value_res.identifier) catch |e| {
+        debug_at(css, initial_index, "Unknown property: '{s}'.", .{name_res.identifier});
+        return e;
+    };
 
     if (std.mem.eql(u8, @tagName(attribute), "unknown")) {
         debug_at(css, initial_index, "Unknown attribute: '{s}'.", .{name_res.identifier});
@@ -222,24 +242,6 @@ fn parse(arena: *std.heap.ArenaAllocator, css: []const u8) !CSSTree {
     };
 }
 
-pub fn print_tree(tree: CSSTree) void {
-    for (tree.blocks, 0..) |block, i| {
-        std.debug.print("selector {d}: {s}\n", .{ i, block.selector });
-        for (block.attributes, 0..) |attr, j| {
-            inline for (@typeInfo(CSSAttribute).Union.fields) |css_field| {
-                if (comptime !std.mem.eql(u8, css_field.name, "unknown")) {
-                    if (std.mem.eql(u8, css_field.name, @tagName(attr))) {
-                        // var attr_name: []const u8 = @as([]const u8, @tagName(attr));
-
-                        std.debug.print("\tattribute {d}: {s}\t value: {s}\n", .{ j, @tagName(attr), @field(attr, css_field.name) });
-                    }
-                }
-            }
-        }
-        std.debug.print("\n", .{});
-    }
-}
-
 pub fn main() !void {
     var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
     defer arena.deinit();
@@ -262,5 +264,5 @@ pub fn main() !void {
     _ = try file.read(css_file);
 
     var tree = parse(&arena, css_file) catch return;
-    print_tree(tree);
+    tree.print_tree();
 }
