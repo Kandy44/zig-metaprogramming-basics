@@ -11,7 +11,7 @@ const CSSAttribute = union(enum) {
     font_size: []const u8,
 };
 
-fn match_attribute(name: []const u8, value: []const u8) !CSSAttribute {
+fn matchAttribute(name: []const u8, value: []const u8) !CSSAttribute {
     const cssAttributeInfo = @typeInfo(CSSAttribute);
     inline for (cssAttributeInfo.Union.fields) |css_field| {
         if (comptime !std.mem.eql(u8, css_field.name, "unknown")) {
@@ -30,16 +30,16 @@ const CSSBlock = struct {
 
 const CSSTree = struct {
     blocks: []CSSBlock,
-    fn print_tree(tree: *CSSTree) void {
+    fn print_tree(tree: *CSSTree, arena: *std.heap.ArenaAllocator) !void {
         for (tree.blocks, 0..) |block, i| {
             std.debug.print("selector {d}: {s}\n", .{ i, block.selector });
             for (block.attributes, 0..) |attr, j| {
                 inline for (@typeInfo(CSSAttribute).Union.fields) |css_field| {
                     if (comptime !std.mem.eql(u8, css_field.name, "unknown")) {
                         if (std.mem.eql(u8, css_field.name, @tagName(attr))) {
-                            // var attr_name: []const u8 = @as([]const u8, @tagName(attr));
+                            var filteredAttrName = try filterDashes(arena, @tagName(attr));
 
-                            std.debug.print("\tattribute {d}: {s}\t value: {s}\n", .{ j, @tagName(attr), @field(attr, css_field.name) });
+                            std.debug.print("\tattribute {d}: {s}  value: {s}\n", .{ j, filteredAttrName, @field(attr, css_field.name) });
                         }
                     }
                 }
@@ -49,7 +49,7 @@ const CSSTree = struct {
     }
 };
 
-fn eat_whitespace(css: []const u8, initial_index: usize) usize {
+fn eatWhitespace(css: []const u8, initial_index: usize) usize {
     var index = initial_index;
     while (index < css.len and (std.ascii.isWhitespace(css[index]) or css[index] == '\n')) {
         index += 1;
@@ -58,7 +58,7 @@ fn eat_whitespace(css: []const u8, initial_index: usize) usize {
     return index;
 }
 
-fn debug_at(css: []const u8, index: usize, comptime msg: []const u8, args: anytype) void {
+fn debugAt(css: []const u8, index: usize, comptime msg: []const u8, args: anytype) void {
     var line_no: usize = 1;
     var col_no: usize = 0;
     var i: usize = 0;
@@ -101,41 +101,46 @@ const ParseIdentifierResult = struct {
     index: usize,
 };
 
-fn parse_identifier(css: []const u8, initial_index: usize) !ParseIdentifierResult {
+fn parseIdentifier(arena: *std.heap.ArenaAllocator, css: []const u8, initial_index: usize) !ParseIdentifierResult {
     var index = initial_index;
     while (index < css.len and (std.ascii.isAlphanumeric(css[index]) or css[index] == '-')) {
         index += 1;
     }
 
     if (index == initial_index) {
-        debug_at(css, initial_index, "Expected valid identifier.", .{});
+        debugAt(css, initial_index, "Expected valid identifier.", .{});
         return error.InvalidIdentifier;
     }
 
     return ParseIdentifierResult{
-        .identifier = filterDashes(css[initial_index..index], true),
+        .identifier = try filterDashes(arena, css[initial_index..index]),
         .index = index,
     };
 }
 
-pub fn filterDashes(str: []const u8, encode: bool) []const u8 {
-    _ = encode;
-    var res_str = @constCast(str);
+pub fn filterDashes(arena: *std.heap.ArenaAllocator, str: []const u8) ![]const u8 {
+    const allocator = arena.allocator();
+    // Allocate memory equal to str and update the res_str
+    var res_str = try allocator.alloc(u8, str.len);
 
-    for (res_str) |*ch| {
-        if (ch.* == '-') {
-            ch.* = '_';
+    for (str, 0..) |ch, idx| {
+        if (ch == '-') {
+            res_str[idx] = '_';
+        } else if (ch == '_') {
+            res_str[idx] = '-';
+        } else {
+            res_str[idx] = ch;
         }
     }
 
     return res_str;
 }
 
-fn parse_syntax(css: []const u8, initial_index: usize, syntax: u8) !usize {
+fn parseSyntax(css: []const u8, initial_index: usize, syntax: u8) !usize {
     if (initial_index < css.len and css[initial_index] == syntax) {
         return initial_index + 1;
     }
-    debug_at(css, initial_index, "Expected syntax: '{c}''.", .{syntax});
+    debugAt(css, initial_index, "Expected syntax: '{c}''.", .{syntax});
     return error.NoSuchSyntax;
 }
 
@@ -144,38 +149,38 @@ const ParseAttributeResult = struct {
     index: usize,
 };
 
-fn parse_attribute(css: []const u8, initial_index: usize) !ParseAttributeResult {
-    var index = eat_whitespace(css, initial_index);
+fn parseAttribute(arena: *std.heap.ArenaAllocator, css: []const u8, initial_index: usize) !ParseAttributeResult {
+    var index = eatWhitespace(css, initial_index);
 
     // First parse attribute name
-    var name_res = parse_identifier(css, index) catch |e| {
+    var name_res = parseIdentifier(arena, css, index) catch |e| {
         std.debug.print("Could not parse attribute name.\n", .{});
         return e;
     };
     index = name_res.index;
-    index = eat_whitespace(css, index);
+    index = eatWhitespace(css, index);
 
     // Then parse colon: :.
-    index = try parse_syntax(css, index, ':');
-    index = eat_whitespace(css, index);
+    index = try parseSyntax(css, index, ':');
+    index = eatWhitespace(css, index);
 
     // Then parse attribute value
-    var value_res = parse_identifier(css, index) catch |e| {
+    var value_res = parseIdentifier(arena, css, index) catch |e| {
         std.debug.print("Could not parse attribute value.\n", .{});
         return e;
     };
     index = value_res.index;
 
     // Finally parse semi-colon: ;.
-    index = try parse_syntax(css, index, ';');
+    index = try parseSyntax(css, index, ';');
 
-    var attribute = match_attribute(name_res.identifier, value_res.identifier) catch |e| {
-        debug_at(css, initial_index, "Unknown property: '{s}'.", .{name_res.identifier});
+    var attribute = matchAttribute(name_res.identifier, value_res.identifier) catch |e| {
+        debugAt(css, initial_index, "Unknown property: '{s}'.", .{name_res.identifier});
         return e;
     };
 
     if (std.mem.eql(u8, @tagName(attribute), "unknown")) {
-        debug_at(css, initial_index, "Unknown attribute: '{s}'.", .{name_res.identifier});
+        debugAt(css, initial_index, "Unknown attribute: '{s}'.", .{name_res.identifier});
         return error.UnknownAttribute;
     }
     return ParseAttributeResult{ .index = index, .attribute = attribute };
@@ -186,36 +191,36 @@ const ParseBlockResult = struct {
     index: usize,
 };
 
-fn parse_block(arena: *std.heap.ArenaAllocator, css: []const u8, initial_index: usize) !ParseBlockResult {
-    var index = eat_whitespace(css, initial_index);
+fn parseBlock(arena: *std.heap.ArenaAllocator, css: []const u8, initial_index: usize) !ParseBlockResult {
+    var index = eatWhitespace(css, initial_index);
 
     // First parse selector(s).
-    var selector_res = try parse_identifier(css, index);
+    var selector_res = try parseIdentifier(arena, css, index);
     index = selector_res.index;
 
-    index = eat_whitespace(css, index);
+    index = eatWhitespace(css, index);
 
     // Then parse opening curly brace. {
-    index = try parse_syntax(css, index, '{');
+    index = try parseSyntax(css, index, '{');
 
-    index = eat_whitespace(css, index);
+    index = eatWhitespace(css, index);
 
     var attributes = std.ArrayList(CSSAttribute).init(arena.allocator());
 
     // Then parse any number of attributes.
     while (index < css.len) {
-        index = eat_whitespace(css, index);
+        index = eatWhitespace(css, index);
         if (index < css.len and css[index] == '}') {
             break;
         }
-        var attr_res = try parse_attribute(css, index);
+        var attr_res = try parseAttribute(arena, css, index);
         index = attr_res.index;
         try attributes.append(attr_res.attribute);
     }
-    index = eat_whitespace(css, index);
+    index = eatWhitespace(css, index);
 
     // Then parse closing curly brace.}
-    index = try parse_syntax(css, index, '}');
+    index = try parseSyntax(css, index, '}');
 
     return ParseBlockResult{
         .block = CSSBlock{
@@ -231,10 +236,10 @@ fn parse(arena: *std.heap.ArenaAllocator, css: []const u8) !CSSTree {
     var blocks = std.ArrayList(CSSBlock).init(arena.allocator());
     // Parse blocks until EOF
     while (index < css.len) {
-        var res = try parse_block(arena, css, index);
+        var res = try parseBlock(arena, css, index);
         index = res.index;
         try blocks.append(res.block);
-        index = eat_whitespace(css, index);
+        index = eatWhitespace(css, index);
     }
 
     return CSSTree{
@@ -264,5 +269,5 @@ pub fn main() !void {
     _ = try file.read(css_file);
 
     var tree = parse(&arena, css_file) catch return;
-    tree.print_tree();
+    try tree.print_tree(&arena);
 }
